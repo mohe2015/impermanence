@@ -307,70 +307,6 @@ in
           else
             "reloadSystemd";
 
-        mkBindMount = persistentStoragePath: dir:
-          let
-            mountDir =
-              if cfg.${persistentStoragePath}.removePrefixDirectory then
-                dirListToPath (tail (splitPath [ dir ]))
-              else
-                dir;
-            targetDir = escapeShellArg (concatPaths [ persistentStoragePath dir ]);
-            mountPoint = escapeShellArg (concatPaths [ config.home.homeDirectory mountDir ]);
-            bindfsOptions = concatStringsSep "," (
-              optional (!cfg.${persistentStoragePath}.allowOther) "no-allow-other"
-              ++ optional (versionAtLeast pkgs.bindfs.version "1.14.9") "fsname=${targetDir}"
-            );
-            bindfsOptionFlag = optionalString (bindfsOptions != "") (" -o " + bindfsOptions);
-            bindfs = "${pkgs.bindfs}/bin/bindfs" + bindfsOptionFlag;
-            systemctl = "XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR:-/run/user/$(id -u)} ${config.systemd.user.systemctlPath}";
-          in
-          ''
-            mkdir -p ${targetDir}
-            mkdir -p ${mountPoint}
-
-            if ${mount} | grep -F ${mountPoint}' ' >/dev/null; then
-                if ! ${mount} | grep -F ${mountPoint}' ' | grep -F bindfs; then
-                    if ! ${mount} | grep -F ${mountPoint}' ' | grep -F ${targetDir}' ' >/dev/null; then
-                        # The target directory changed, so we need to remount
-                        echo "remounting ${mountPoint}"
-                        ${systemctl} --user stop bindMount-${sanitizeName targetDir}
-                        ${bindfs} ${targetDir} ${mountPoint}
-                        mountedPaths[${mountPoint}]=1
-                    fi
-                fi
-            elif ${mount} | grep -F ${mountPoint}/ >/dev/null; then
-                echo "Something is mounted below ${mountPoint}, not creating bind mount to ${targetDir}" >&2
-            else
-                ${bindfs} ${targetDir} ${mountPoint}
-                mountedPaths[${mountPoint}]=1
-            fi
-          '';
-
-        mkBindMountsForPath = persistentStoragePath:
-          concatMapStrings
-            (mkBindMount persistentStoragePath)
-            (map getDirPath (filter isBindfs cfg.${persistentStoragePath}.directories));
-
-        mkUnmount = persistentStoragePath: dir:
-          let
-            mountDir =
-              if cfg.${persistentStoragePath}.removePrefixDirectory then
-                dirListToPath (tail (splitPath [ dir ]))
-              else
-                dir;
-            mountPoint = escapeShellArg (concatPaths [ config.home.homeDirectory mountDir ]);
-          in
-          ''
-            if [[ -n ''${mountedPaths[${mountPoint}]+x} ]]; then
-              ${unmountScript mountPoint 3 1}
-            fi
-          '';
-
-        mkUnmountsForPath = persistentStoragePath:
-          concatMapStrings
-            (mkUnmount persistentStoragePath)
-            (map getDirPath (filter isBindfs cfg.${persistentStoragePath}.directories));
-
         mkLinkCleanup = persistentStoragePath: dir:
           let
             mountDir =
@@ -396,7 +332,6 @@ in
             (mkLinkCleanup persistentStoragePath)
             (map getDirPath (filter isSymlink cfg.${persistentStoragePath}.directories));
 
-
       in
       mkMerge [
         (mkIf (any (path: (filter isSymlink cfg.${path}.directories) != [ ]) persistentStoragePaths) {
@@ -406,36 +341,6 @@ in
               [ "checkLinkTargets" ]
               ''
                 ${concatMapStrings mkLinkCleanupForPath persistentStoragePaths}
-              '';
-        })
-        (mkIf (any (path: (filter isBindfs cfg.${path}.directories) != [ ]) persistentStoragePaths) {
-          createAndMountPersistentStoragePaths =
-            dag.entryBefore
-              [ "writeBoundary" ]
-              ''
-                declare -A mountedPaths
-                ${(concatMapStrings mkBindMountsForPath persistentStoragePaths)}
-              '';
-
-          unmountPersistentStoragePaths =
-            dag.entryBefore
-              [ "createAndMountPersistentStoragePaths" ]
-              ''
-                PATH=$PATH:/run/wrappers/bin
-                unmountBindMounts() {
-                ${concatMapStrings mkUnmountsForPath persistentStoragePaths}
-                }
-
-                # Run the unmount function on error to clean up stray
-                # bind mounts
-                trap "unmountBindMounts" ERR
-              '';
-
-          runUnmountPersistentStoragePaths =
-            dag.entryBefore
-              [ reloadSystemd ]
-              ''
-                unmountBindMounts
               '';
         })
         (mkIf (any (path: (cfg.${path}.files != [ ]) || ((filter isSymlink cfg.${path}.directories) != [ ])) persistentStoragePaths) {
